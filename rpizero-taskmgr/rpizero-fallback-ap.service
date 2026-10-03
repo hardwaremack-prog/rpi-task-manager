@@ -1,0 +1,13 @@
+[Unit]
+Description=RPiZero fallback Wi-Fi hotspot (RPIZERO-OPEN) when there's no network at boot
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rpizero-fallback-ap
+RemainAfterExit=yes
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

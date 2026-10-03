@@ -1,0 +1,16 @@
+[Unit]
+Description=RPiZero Task Manager web page (port 8090)
+After=network.target NetworkManager.service
+
+[Service]
+Type=simple
+User=@USER@
+ExecStart=/usr/bin/python3 /opt/rpizero-taskmgr/rpizero_taskmgr.py
+Restart=always
+RestartSec=3
+Nice=5
+# keep it light on the Zero's 512 MB
+MemoryMax=120M
+
+[Install]
+WantedBy=multi-user.target
