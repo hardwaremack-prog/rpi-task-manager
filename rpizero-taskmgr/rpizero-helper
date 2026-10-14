@@ -718,6 +718,24 @@ update)   # update start | run USER | status — update everything on the Pi
         else
             echo "   ! Couldn't check for a newer Task Manager this time."
         fi
+        # Put the newest Task Manager downloads on The Shelf (Programs), replacing any older copies there
+        if [ -n "${shelf:-}" ] && [ -d "$tmp/tm" ]; then
+            progs="$shelf/shared/Programs"; owner="$(stat -c %U "$shelf")"
+            sudo -u "$owner" mkdir -p "$progs"
+            ver="$(cat "$tmp/tm/$EDITION-taskmgr/VERSION" 2>/dev/null)"
+            made=0; removed=0
+            for ed in "rpi4""00" "rpi5""00" "rpize""ro"; do
+                [ -f "$tmp/tm/$ed-taskmgr/install.sh" ] || continue
+                for old in "$progs/$ed-taskmgr"*.zip; do
+                    [ -e "$old" ] && [ "$old" != "$progs/$ed-taskmgr.zip" ] && rm -f "$old" && removed=$((removed + 1))
+                done
+                if ( cd "$tmp/tm" && python3 -m zipfile -c "$tmp/$ed-taskmgr.zip" "$ed-taskmgr" ) \
+                   && install -m 644 -o "$owner" "$tmp/$ed-taskmgr.zip" "$progs/$ed-taskmgr.zip"; then
+                    made=$((made + 1))
+                fi
+            done
+            echo "-- The Shelf's Programs folder: the $made Task Manager downloads are now version ${ver:-?}$([ $removed -gt 0 ] && echo "; removed $removed older copies")."
+        fi
         finish done "Everything is up to date. $n system package(s) updated."
         ;;
     status)
