@@ -7,6 +7,9 @@ USER_NAME="${SUDO_USER:-$(getent passwd 1000 | cut -d: -f1)}"
 USER_HOME="$(getent passwd "$USER_NAME" | cut -d: -f6)"
 
 /usr/local/bin/rpi400-helper led stop >/dev/null 2>&1
+systemctl disable --now rpi400-web.service 2>/dev/null
+rm -f /etc/systemd/system/rpi400-web.service /usr/local/bin/rpi400-web
+rm -f "$USER_HOME/.config/rpi400-taskmgr/web-password.json"
 rm -f /etc/NetworkManager/dispatcher.d/90-rpi400-led /etc/rpi400-taskmgr.conf
 systemctl disable --now rpi400-fallback-ap.service 2>/dev/null
 rm -f /etc/systemd/system/rpi400-fallback-ap.service

@@ -289,6 +289,26 @@ ap-data)   # ap-data keep | share | status
     fi
     ;;
 
+web)   # web on | off | status  — the Task Manager as a web page for phones and PCs on the same network
+    unit=rpi500-web.service
+    [ -f "/etc/systemd/system/$unit" ] || { echo "The web page isn't installed yet. Run:  sudo bash install.sh"; exit 1; }
+    case "${2:-status}" in
+        on)
+            systemctl enable "$unit" >/dev/null 2>&1
+            systemctl restart "$unit" || { echo "The web page didn't start. See: journalctl -u $unit"; exit 1; }
+            port=$(sed -n 's/^Environment=RZ_PORT=//p' "/etc/systemd/system/$unit" | head -1)
+            ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.' | head -3 | sed "s#.*#http://&:${port:-8090}#" | tr '\n' ' ' | sed 's/ *$//; s/ / or /g')
+            echo "Web page is on. Open ${ips:-the Pi on port ${port:-8090}} on any phone or PC on the same network."
+            ;;
+        off)
+            systemctl disable --now "$unit" >/dev/null 2>&1
+            echo "Web page is off."
+            ;;
+        status) systemctl is-enabled "$unit" 2>/dev/null || true ;;
+        *) echo "usage: rpi500-helper web on|off|status"; exit 2 ;;
+    esac
+    ;;
+
 ap-band)
     case "${2:-}" in
         2.4|bg) new=bg ;;
@@ -513,11 +533,187 @@ vnc-enable)
     fi
     ;;
 
+update)   # update start | run USER | status — update everything on the Pi
+    UPD_LOG="${RPI500_UPDATE_LOG:-/var/log/rpi500-update.log}"      # readable by the app, so it can show progress
+    UPD_STATE="${RPI500_UPDATE_STATE:-/run/rpi500-update.state}"    # running|done|failed  start-time  end-time  reboot(0/1)
+    EDITION=rpi500
+    TM_REPO="${RPI500_TM_REPO:-https://github.com/hardwaremack-prog/rpi-task-manager/archive/HEAD.tar.gz}"
+    SHELF_REPO="${RPI500_SHELF_REPO:-https://github.com/hardwaremack-prog/the-shelf/archive/HEAD.tar.gz}"
+    upd_running() { read -r st _ 2>/dev/null < "$UPD_STATE" && [ "$st" = running ] && pgrep -f "rpi500-helper update run" >/dev/null; }
+    case "${2:-status}" in
+    start)
+        if upd_running; then echo "An update is already running."; exit 0; fi
+        who="${SUDO_USER:-$(getent passwd 1000 | cut -d: -f1)}"
+        echo "running $(date +%s) 0 0" > "$UPD_STATE"; chmod 644 "$UPD_STATE"
+        : > "$UPD_LOG"; chmod 644 "$UPD_LOG"
+        # Runs apart from the app, so closing the app (or the web page restarting) can't interrupt it
+        if command -v systemd-run >/dev/null && [ -d /run/systemd/system ]; then
+            systemctl reset-failed rpi500-update.service >/dev/null 2>&1
+            if ! systemd-run --unit=rpi500-update --collect --quiet "$0" update run "$who" >/dev/null 2>&1; then
+                setsid nohup "$0" update run "$who" >/dev/null 2>&1 < /dev/null &
+            fi
+        else
+            setsid nohup "$0" update run "$who" >/dev/null 2>&1 < /dev/null &
+        fi
+        echo "Update started. It can take 5 to 30 minutes. Keep the Pi powered on."
+        ;;
+    run)
+        exec >>"$UPD_LOG" 2>&1
+        who="${3:-$(getent passwd 1000 | cut -d: -f1)}"
+        home="$(getent passwd "$who" | cut -d: -f6)"
+        start=$(read -r _ t _ 2>/dev/null < "$UPD_STATE"; echo "${t:-$(date +%s)}")
+        tmp=$(mktemp -d /tmp/rpi500-update.XXXXXX)
+        trap 'rm -rf "$tmp"' EXIT
+        finish() {   # finish done|failed message
+            local reboot=0
+            if [ -f /var/run/reboot-required ] || [ -f "$tmp/reboot" ] \
+               || grep -qE "^(Unpacking|Setting up) (linux-image|raspi-firmware|raspberrypi-kernel|raspberrypi-bootloader|rpi-eeprom)" "$UPD_LOG" \
+               || grep -q "EEPROM updates pending" "$UPD_LOG"; then
+                reboot=1
+            fi
+            echo; echo "== $2"
+            [ "$reboot" = 1 ] && echo "== Restart the Pi to finish (new system software, firmware or Task Manager was installed)."
+            echo "$1 $start $(date +%s) $reboot" > "$UPD_STATE"
+            exit 0
+        }
+        fetch() {   # fetch URL DIR — download a GitHub project and unpack it into DIR
+            mkdir -p "$2" && curl -fsSL --retry 2 --max-time 300 "$1" | tar -xz -C "$2" --strip-components=1
+        }
+        echo "== Update started $(date '+%A %B %d, %Y at %I:%M %p') for user $who"
+        if ! timeout 15 getent hosts deb.debian.org archive.raspberrypi.com github.com >/dev/null 2>&1; then
+            finish failed "No internet, so nothing was updated. Connect the Pi to a network with internet (not its own hotspot) and try again."
+        fi
+        export DEBIAN_FRONTEND=noninteractive
+        APT=(apt-get -y -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+
+        echo; echo "== 1/6 Checking for new system software"
+        "${APT[@]}" update || finish failed "Couldn't check for updates (see the messages above)."
+        echo; echo "== 2/6 Installing system updates"
+        n=$(apt-get -s full-upgrade 2>/dev/null | grep -c '^Inst ')
+        echo "$n package(s) to update"
+        "${APT[@]}" full-upgrade || finish failed "Some updates didn't install. Try again; if it keeps failing, run: sudo apt full-upgrade"
+        echo; echo "== 3/6 Removing old versions and leftovers"
+        "${APT[@]}" autoremove --purge
+        apt-get clean
+        echo; echo "== 4/6 Firmware"
+        if command -v rpi-eeprom-update >/dev/null; then
+            rpi-eeprom-update -a 2>&1 | sed 's/^/   /'
+        else
+            echo "   This Pi keeps its firmware on the SD card, which step 2 already updated."
+        fi
+
+        echo; echo "== 5/6 Your apps"
+        if command -v ollama >/dev/null; then
+            echo "-- Local AI engine (Ollama)"
+            if curl -fsSL https://ollama.com/install.sh | sh >"$tmp/ollama.log" 2>&1; then
+                echo "   Up to date: $(ollama --version 2>/dev/null | tail -1)"
+            else
+                echo "   ! Couldn't update it this time (details: $(tail -1 "$tmp/ollama.log"))"
+            fi
+        fi
+        command -v tailscale >/dev/null && echo "-- Tailscale: updated with the system software in step 2"
+        # The Shelf: find where it's installed, update its program files, keep your files (shared/, data/)
+        shelf_dirs=()
+        for d in "$(sed -n 's/^Path=//p' "$home/.config/autostart/theshelf.desktop" 2>/dev/null)" \
+                 $(for p in $(pgrep -f "server.js"); do readlink "/proc/$p/cwd"; done 2>/dev/null) \
+                 "$home/.local/share/TheShelf" "$home/the-shelf" "$home/Documents/the-shelf" "$home/TheShelf"; do
+            [ -n "$d" ] && [ -f "$d/server.js" ] && grep -qs '"name": *"the-shelf"' "$d/package.json" || continue
+            d="$(readlink -f "$d")"
+            [[ " ${shelf_dirs[*]} " == *" $d "* ]] || shelf_dirs+=("$d")
+        done
+        if [ ${#shelf_dirs[@]} -eq 0 ]; then
+            echo "-- The Shelf: not installed on this Pi, nothing to update"
+        else
+            shelf="${shelf_dirs[0]}"
+            echo "-- The Shelf ($shelf)"
+            if fetch "$SHELF_REPO" "$tmp/shelf"; then
+                if diff -rq -x shared -x data -x node_modules -x installer -x .git "$tmp/shelf" "$shelf" 2>/dev/null | grep -q "^Files .* differ\|^Only in $tmp/shelf"; then
+                    deps_changed=0
+                    cmp -s "$tmp/shelf/package.json" "$shelf/package.json" && cmp -s "$tmp/shelf/package-lock.json" "$shelf/package-lock.json" || deps_changed=1
+                    owner="$(stat -c %U "$shelf")"
+                    ( cd "$tmp/shelf" && tar -cf - --exclude=./shared --exclude=./data --exclude=./node_modules --exclude=./installer . ) \
+                        | sudo -u "$owner" tar -xf - -C "$shelf"
+                    if [ "$deps_changed" = 1 ] || [ ! -d "$shelf/node_modules" ]; then
+                        echo "   Installing its libraries…"
+                        sudo -u "$owner" -H bash -c "cd '$shelf' && npm install --omit=dev --no-audit --no-fund" 2>&1 | tail -2 | sed 's/^/   /'
+                    fi
+                    echo "   Updated to the newest version. Your pictures, music, notes and other files were kept."
+                    # restart it so the new version is the one answering
+                    unit=$(grep -ls "$shelf" /etc/systemd/system/*.service 2>/dev/null | head -1)
+                    if [ -n "$unit" ]; then
+                        systemctl restart "$(basename "$unit")" && echo "   Restarted."
+                    else
+                        pids=$(for p in $(pgrep -f "server.js"); do [ "$(readlink "/proc/$p/cwd")" = "$shelf" ] && echo "$p"; done)
+                        if [ -n "$pids" ]; then
+                            kill $pids 2>/dev/null; sleep 2
+                            sudo -u "$owner" -H bash -c "cd '$shelf' && setsid nohup node server.js >/dev/null 2>&1 < /dev/null &"
+                            echo "   Restarted."
+                        fi
+                    fi
+                else
+                    echo "   Already the newest version."
+                fi
+            else
+                echo "   ! Couldn't download the newest version this time."
+            fi
+            for other in "${shelf_dirs[@]:1}"; do
+                echo "   Note: there's another, older copy of The Shelf in $other. It wasn't changed or deleted, because it may hold your own files. Once you've copied anything you want from its shared and data folders, you can delete that folder."
+            done
+        fi
+
+        echo; echo "== 6/6 RPi Task Manager"
+        # one Pi, one edition: remove any other edition so there's no confusion
+        # (names split in two so the build scripts that rename this file leave the list alone)
+        for ed in "rpi4""00" "rpi5""00" "rpize""ro"; do
+            [ "$ed" = "$EDITION" ] && continue
+            [ -d "/opt/$ed-taskmgr" ] || [ -x "/usr/local/bin/$ed-helper" ] || continue
+            echo "-- Removing the older $ed edition of the Task Manager"
+            systemctl disable --now "$ed-fallback-ap.service" "$ed-web.service" "$ed-taskmgr.service" >/dev/null 2>&1
+            rm -f /etc/systemd/system/"$ed"-fallback-ap.service /etc/systemd/system/"$ed"-web.service /etc/systemd/system/"$ed"-taskmgr.service
+            rm -rf "/opt/$ed-taskmgr"
+            rm -f /usr/local/bin/"$ed"-taskmgr /usr/local/bin/"$ed"-helper /usr/local/bin/"$ed"-web /usr/local/sbin/"$ed"-fallback-ap \
+                  /etc/sudoers.d/"$ed"-taskmgr /usr/share/applications/"$ed"-taskmgr.desktop "$home/.config/autostart/$ed-taskmgr.desktop" \
+                  /etc/NetworkManager/dispatcher.d/90-"$ed"-led /etc/NetworkManager/dnsmasq-shared.d/"$ed"-taskmgr.conf
+            nmcli con delete "${ed^^}-OPEN" >/dev/null 2>&1
+            for f in "$home/.config/labwc/rc.xml" "$home/.config/openbox/lxde-pi-rc.xml" "$home/.config/wayfire.ini"; do
+                [ -f "$f" ] && sed -i "/$ed/d" "$f"
+            done
+            systemctl daemon-reload 2>/dev/null
+        done
+        have="$(cat "/opt/$EDITION-taskmgr/VERSION" 2>/dev/null || echo 0)"
+        if fetch "$TM_REPO" "$tmp/tm" && [ -f "$tmp/tm/$EDITION-taskmgr/install.sh" ]; then
+            new="$(cat "$tmp/tm/$EDITION-taskmgr/VERSION" 2>/dev/null || echo 0)"
+            if [[ "$new" > "$have" ]]; then
+                echo "   Installing version $new (this Pi had ${have/#0/an earlier version})…"
+                if ( cd "$tmp/tm/$EDITION-taskmgr" && SKIP_AI=1 bash install.sh < /dev/null ) > "$tmp/tm-install.log" 2>&1; then
+                    echo "   Done. Close and reopen the Task Manager (or restart the Pi) to use it."
+                    touch "$tmp/reboot"
+                else
+                    echo "   ! The new version didn't install: $(tail -2 "$tmp/tm-install.log" | tr '\n' ' ')"
+                fi
+            else
+                echo "   Already the newest version ($have)."
+            fi
+        else
+            echo "   ! Couldn't check for a newer Task Manager this time."
+        fi
+        finish done "Everything is up to date. $n system package(s) updated."
+        ;;
+    status)
+        read -r st t0 t1 rb 2>/dev/null < "$UPD_STATE" || { echo "idle"; exit 0; }
+        if [ "$st" = running ] && ! upd_running; then st=failed; fi
+        echo "$st ${t0:-0} ${t1:-0} ${rb:-0}"
+        tail -n 15 "$UPD_LOG" 2>/dev/null
+        ;;
+    *) echo "usage: rpi500-helper update start|status"; exit 2 ;;
+    esac
+    ;;
+
 reboot)   systemctl reboot ;;
 poweroff) systemctl poweroff ;;
 
 *)
-    echo "usage: rpi500-helper {dropcaches|bt-on|bt-rescue|ap-ensure|ap-up|ap-down|ap-band 2.4|5|ap-set NAME PASS|ap-data keep|share|oc stock|2000|2147|2600|2800|3000|gpu-boost on|off|gov powersave|ondemand|performance|kill PID TERM|KILL|kick MAC|led on|off|start|stop|test|status|ai on|off|install|status|vpn install|up|key KEY|down|logout|vnc-enable|reboot|poweroff}"
+    echo "usage: rpi500-helper {dropcaches|bt-on|bt-rescue|ap-ensure|ap-up|ap-down|ap-band 2.4|5|ap-set NAME PASS|ap-data keep|share|oc stock|2000|2147|2600|2800|3000|gpu-boost on|off|gov powersave|ondemand|performance|kill PID TERM|KILL|kick MAC|led on|off|start|stop|test|status|ai on|off|install|status|vpn install|up|key KEY|down|logout|web on|off|status|update start|status|vnc-enable|reboot|poweroff}"
     exit 2
     ;;
 esac

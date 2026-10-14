@@ -9,6 +9,8 @@
 #   SKIP_AI=1              don't install the local AI (Ollama)
 #   AI_MODEL=gemma3:1b     which AI model to download (default: llama3.2:3b with 8 GB+ RAM, else qwen2.5:0.5b)
 #   TAILSCALE_AUTHKEY=tskey-...   join your Tailscale network straight away (otherwise switch it on in the app)
+#   WEB_PASSWORD=...       turn on the web page for phones and PCs on your network, with this control password
+#   WEB_PORT=8090          port for that web page
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
@@ -51,6 +53,7 @@ fi
 step "Copying program files"
 install -d /opt/rpi500-taskmgr
 install -m 755 "$HERE/rpi500_taskmgr.py" /opt/rpi500-taskmgr/rpi500_taskmgr.py
+install -m 644 "$HERE/VERSION" /opt/rpi500-taskmgr/VERSION
 install -m 755 -o root -g root "$HERE/rpi500-helper" /usr/local/bin/rpi500-helper
 install -m 755 -o root -g root "$HERE/rpi500-fallback-ap" /usr/local/sbin/rpi500-fallback-ap
 cat > /usr/local/bin/rpi500-taskmgr <<'EOF'
@@ -58,6 +61,14 @@ cat > /usr/local/bin/rpi500-taskmgr <<'EOF'
 exec python3 /opt/rpi500-taskmgr/rpi500_taskmgr.py "$@"
 EOF
 chmod 755 /usr/local/bin/rpi500-taskmgr
+install -d /opt/rpi500-taskmgr/web
+install -m 755 "$HERE/rpi500_web.py" /opt/rpi500-taskmgr/rpi500_web.py
+install -m 644 "$HERE/web/index.html" /opt/rpi500-taskmgr/web/index.html
+cat > /usr/local/bin/rpi500-web <<'EOF'
+#!/bin/sh
+exec python3 /opt/rpi500-taskmgr/rpi500_web.py "$@"
+EOF
+chmod 755 /usr/local/bin/rpi500-web
 
 step "Letting the app run its root helper without a password prompt"
 TMP_SUDO="$(mktemp)"
@@ -136,6 +147,26 @@ else
     echo "   Switch on Tailscale in the Tools tab whenever you want to reach this Pi from anywhere."
 fi
 
+step "Web page for phones and PCs on your network (off until you switch it on)"
+DESK="$(sudo -u "$USER_NAME" HOME="$USER_HOME" xdg-user-dir DESKTOP 2>/dev/null || true)"
+[ -n "$DESK" ] && [ "$DESK" != "$USER_HOME" ] || DESK="$USER_HOME/Desktop"
+WEB_PORT="${WEB_PORT:-8090}"
+sed -e "s#@USER@#$USER_NAME#" -e "s#@DESKTOP@#$DESK#" -e "s#RZ_PORT=8090#RZ_PORT=$WEB_PORT#" \
+    "$HERE/rpi500-web.service" > /etc/systemd/system/rpi500-web.service
+systemctl daemon-reload
+if [ -n "${WEB_PASSWORD:-}" ]; then
+    if printf '%s\n' "$WEB_PASSWORD" | sudo -u "$USER_NAME" HOME="$USER_HOME" python3 /opt/rpi500-taskmgr/rpi500_web.py --set-password >/dev/null \
+        && /usr/local/bin/rpi500-helper web on; then
+        :
+    else
+        warn "Couldn't turn on the web page. Use the Web page switch in the Tools tab."
+    fi
+elif systemctl is-enabled rpi500-web.service >/dev/null 2>&1; then
+    systemctl restart rpi500-web.service && echo "   Web page is on (restarted with the new version)"
+else
+    echo "   Flip the Web page switch in the Tools tab when you want to use the Task Manager from a phone or PC."
+fi
+
 step "Adding menu entry and starting with the desktop"
 cat > /usr/share/applications/rpi500-taskmgr.desktop <<'EOF'
 [Desktop Entry]
@@ -174,6 +205,8 @@ cat <<EOF
  • It opens by itself when the desktop starts.
  • AI tab (F5): chat with a small AI that runs on the Pi itself, even offline.
  • VNC: connect to ${IP_NOW}:5900 with your Pi login.
+ • Web page: flip "Web page" on in the Tools tab, then open
+     http://${IP_NOW}:${WEB_PORT} on any phone or PC on your network.
  • No network at boot? After ~60 s it creates Wi-Fi
      RPI500-OPEN   password fifty-seven57   Pi at 192.168.1.250
    and the power light flashes while that hotspot is on.

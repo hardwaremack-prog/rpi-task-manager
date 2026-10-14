@@ -33,7 +33,7 @@ To remove everything: `sudo bash uninstall.sh`
 | **F2 Processes** | Sortable list (click headers), filter box, End task (**Del**), Force kill (**Shift+Del**) |
 | **F3 Network** | A card per interface with blinking **LINK / RX / TX lights**, speeds, totals, Wi-Fi signal · traffic graph · list of devices connected to your hotspot |
 | **F5 AI** | An on/off **AI** switch and a chat with a small AI that runs entirely on the Pi. It works offline once a model is downloaded |
-| **F4 Tools** | Clean memory · Bluetooth rescue + pair a new device · hotspot on/off with a **join-by-QR-code**, your own name & password, and a switch so phones keep their mobile data · CPU mode (Battery saver / Balanced / Full speed) · overclock presets · stability test · VNC · **Tailscale** (reach the Pi from anywhere) · start-at-login · reboot / shut down |
+| **F4 Tools** | Clean memory · Bluetooth rescue + pair a new device · hotspot on/off with a **join-by-QR-code**, your own name & password, and a switch so phones keep their mobile data · CPU mode (Battery saver / Balanced / Full speed) · overclock presets · stability test · **Update everything** · VNC · **Web page** for phones & PCs · **Tailscale** (reach the Pi from anywhere) · start-at-login · reboot / shut down |
 
 The top bar always shows your IP addresses, a **👥 people counter** for the hotspot, and link lights for `eth0`, `wlan0` and Bluetooth, whatever tab you're on.
 
@@ -114,11 +114,17 @@ If the hotspot is running, switching restarts it and connected devices rejoin af
 
 **Your own name and password.** Press **✏ Change** next to the network name in the Tools tab, type a new name (1–32 characters) and password (8–63), and press Enter. The QR code updates, and the automatic hotspot at boot uses the new name. If the hotspot is on it restarts, and everyone joins again with the new password. **Back to default** returns to RPI500-OPEN / fifty-seven57, as does `sudo rpi500-helper ap-set --default`.
 
-**The hotspot address.** `192.168.1.250` is on the same range many home routers use. That's fine because the hotspot only runs when the Pi isn't on another network. People join RPI500-OPEN and open `http://192.168.1.250/` to reach The Shelf. If The Shelf ends up on a different port, change `SHELF_URL` near the top of `rpi500_taskmgr.py`.
+**The hotspot address.** `192.168.1.250` is on the same range many home routers use. That's fine because the hotspot only runs when the Pi isn't on another network. People join RPI500-OPEN and open `http://192.168.1.250:8080/` to reach The Shelf (its usual port). If you set The Shelf up on port 80 instead, the Tools tab notices and shows `http://192.168.1.250/`.
 
 **Coming home.** Once the hotspot is on, the Pi won't hop back onto your home Wi-Fi by itself. Press Ctrl+H (Stop hotspot) and it reconnects.
 
 **Security.** The hotspot password is shared with everyone you hand it to, and anyone on the hotspot can reach VNC. VNC still asks for your Pi username and password, so keep that password a strong one. Only devices signed in to your own Tailscale account can reach the Pi over Tailscale.
+
+**Update everything (Ctrl+U).** One button in the Tools tab brings the whole Pi up to date: Raspberry Pi OS and every installed program (Tailscale included), the firmware, the local AI engine, **The Shelf** (newest version from GitHub; your pictures, music, notes and other files are kept, and it restarts) and this Task Manager itself (only if GitHub has a newer version). It also removes old kernels and leftover packages, and any other edition of the Task Manager on the same Pi, so there's only one. A window shows each step live; closing it doesn't stop the update. It needs internet and takes 5–30 minutes, then asks you to restart if needed. From a terminal: `sudo rpi500-helper update start` (progress in `/var/log/rpi500-update.log`).
+
+**Your username** is shown in the top bar (👤), next to the Pi's address.
+
+**Use it from a phone or PC (web page).** Flip **Web page** on in the Tools tab. The first time, it asks you to choose a password (6+ characters) for the web page's controls. The line under the switch then shows the address, e.g. `http://192.168.1.20:8090` (on the hotspot: `http://192.168.1.250:8090`). Open it in any browser on the same network: anyone can see the gauges, processes and network lights, and after **Log in** you get the hotspot, who's connected, the visitor log, ending programs, Bluetooth, CPU mode, overclock, stability test, Tailscale and reboot. It keeps running when the Task Manager window is closed, and after reboots, until you switch it off. **🔑 Password** changes the password. The AI chat, Wi-Fi band switch and graphics boost stay on the Pi. Install options: `sudo WEB_PASSWORD=... bash install.sh` turns it on straight away, `WEB_PORT=` picks another port. From a terminal: `sudo rpi500-helper web on` / `off`. Pick a password that's different from the hotspot password, since everyone on the hotspot knows that one.
 
 **Reach the Pi from anywhere (Tailscale).** VNC only works on the same network as the Pi. Tailscale is a free private network (a "VPN") that links your own devices together wherever they are, with nothing to set up on your router.
 1. Flip the **Tailscale** switch in the Tools tab. The first time, it asks to download Tailscale (about 30 MB, needs internet).
@@ -140,7 +146,8 @@ sudo bash setup-shortcuts.sh
 |---|---|---|
 | `rpi500_taskmgr.py` | `/opt/rpi500-taskmgr/` | The app (Python + Tk) |
 | `rpi500-helper` | `/usr/local/bin/` | Small root-only script for the privileged buttons |
+| `rpi500_web.py` + `web/index.html` | `/opt/rpi500-taskmgr/` | The web page for phones and PCs (`rpi500-web.service`, off until switched on) |
 | `rpi500-fallback-ap` + `.service` | `/usr/local/sbin/`, systemd | Starts the hotspot at boot when offline |
-| `/etc/rpi500-taskmgr.conf` | (created) | Hotspot band (`AP_BAND`) and power-light setting (`LED_BLINK`) |
+| `/etc/rpi500-taskmgr.conf` | (created) | Hotspot name/password (`AP_SSID`, `AP_PASS`), band (`AP_BAND`), mobile-data setting (`AP_SHARE`) and power-light setting (`LED_BLINK`) |
 | `setup-shortcuts.sh` | (run from the folder) | Adds the global shortcuts for labwc, Wayfire or Openbox |
 | `90-rpi500-led` | `/etc/NetworkManager/dispatcher.d/` | Flashes the power light while the hotspot is up |

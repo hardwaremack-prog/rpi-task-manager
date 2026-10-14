@@ -56,10 +56,15 @@ AP_SSID_DEFAULT = "RPI400-OPEN"   # Wi-Fi name and password; can be changed in t
 AP_PASS_DEFAULT = "fifty-seven57"
 AP_SSID, AP_PASS = AP_SSID_DEFAULT, AP_PASS_DEFAULT
 AP_IP = "192.168.1.250"
-SHELF_URL = f"http://{AP_IP}/"
+SHELF_URL = f"http://{AP_IP}:8080/"   # The Shelf's usual address on the hotspot (see shelf_url)
 VISITOR_LOG = "RPI400-OPEN visitor log.csv"   # kept on the Desktop
 LIVE_REPORT = "RPI400-OPEN visitors - latest.txt"   # auto-saved report, kept current
 LED_CONF = "/etc/rpi400-taskmgr.conf"
+UPDATE_LOG = "/var/log/rpi400-update.log"      # written by "rpi400-helper update", readable by everyone
+UPDATE_STATE = "/run/rpi400-update.state"      # running|done|failed  start  end  reboot-needed
+WEB_UNIT = "/etc/systemd/system/rpi400-web.service"
+WEB_SERVER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rpi400_web.py")
+WEB_PASSWORD_FILE = os.path.expanduser("~/.config/rpi400-taskmgr/web-password.json")
 OLLAMA = "http://127.0.0.1:11434"
 RAM_GB = psutil.virtual_memory().total / 1024 ** 3
 if RAM_GB >= 7:   # 8 or 16 GB, e.g. Pi 500+: room for much smarter models
@@ -656,6 +661,12 @@ class SlowPoller(threading.Thread):
 
         ports = listening_ports()
         d["vnc"] = 5900 in ports
+        d["shelf_url"] = shelf_url(ports)
+        d["web_port"] = web_port()
+        d["web"] = d["web_port"] in ports
+        if self._n % 3 == 0 or self.vpn_now:   # (kept between polls: _data is merged)
+            rc, out = run(["systemctl", "is-enabled", "rpi400-web.service"], 3)
+            d["web_enabled"] = out.strip() == "enabled"
         d["ssh"] = 22 in ports
 
         rc, out = run(["bluetoothctl", "show"], 3)
@@ -860,6 +871,56 @@ def panel(parent, **kw):
 
 def heading(parent, text):
     return tk.Label(parent, text=text, bg=C["panel"], fg=C["accent"], font=FONT_B, anchor="w")
+
+
+def shelf_url(ports=None):
+    """The Shelf listens on 8080 unless it was set up on port 80."""
+    if ports is None:
+        ports = listening_ports()
+    return f"http://{AP_IP}/" if 80 in ports and 8080 not in ports else f"http://{AP_IP}:8080/"
+
+
+def current_user():
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (KeyError, ImportError):
+        return os.environ.get("USER") or "?"
+
+
+def update_state():
+    """('idle'|'running'|'done'|'failed', start, end, reboot_needed, log_text)"""
+    parts = read_file(UPDATE_STATE).split()
+    st = parts[0] if parts else "idle"
+    nums = [int(x) if x.isdigit() else 0 for x in (parts[1:4] + ["0", "0", "0"])[:3]]
+    if st == "running" and nums[0] and time.time() - nums[0] > 3 * 3600:
+        st = "failed"   # the Pi was restarted or the update was stopped part-way
+    return st, nums[0], nums[1], nums[2] == 1, read_file(UPDATE_LOG)
+
+
+def web_port():
+    m = re.search(r"^Environment=RZ_PORT=(\d+)", read_file(WEB_UNIT), re.M)
+    return int(m.group(1)) if m else 8090
+
+
+def local_ips():
+    """This Pi's IPv4 addresses on its networks (hotspot included), without the Tailscale one."""
+    ips = []
+    for name, addrs in psutil.net_if_addrs().items():
+        if name == "lo" or name.startswith("tailscale"):
+            continue
+        ips += [a.address for a in addrs if a.family == socket.AF_INET and not a.address.startswith("127.")]
+    return ips
+
+
+def set_web_password(pw):
+    """Saves the web page's control password (scrambled) using the web server's own code."""
+    try:
+        p = subprocess.run(["python3", WEB_SERVER, "--set-password"], input=pw + "\n", capture_output=True,
+                           text=True, timeout=20)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except Exception as e:  # noqa
+        return 1, str(e)
 
 
 def load_ap_settings():
@@ -1122,6 +1183,132 @@ class BtPairDialog(tk.Toplevel):
 
 
 # ---------------------------------------------------------------- Tailscale sign-in
+class UpdateWindow(tk.Toplevel):
+    """Shows an update's progress live. Closing it doesn't stop the update."""
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.title("Update everything")
+        self.configure(bg=C["panel"])
+        self.geometry("720x520")
+        self.transient(app)
+        tk.Label(self, text="⬆  Update everything", bg=C["panel"], fg=C["fg"], font=(FAM, 15, "bold")).pack(
+            anchor="w", padx=16, pady=(16, 2))
+        self.status = tk.Label(self, text="Starting…", bg=C["panel"], fg=C["amber"], font=FONT_B, anchor="w",
+                               justify="left", wraplength=680)
+        self.status.pack(fill="x", padx=16)
+        self.text = tk.Text(self, bg=C["bg"], fg=C["fg"], font=("DejaVu Sans Mono", 9), relief="flat", wrap="word",
+                            highlightthickness=0, padx=8, pady=6)
+        self.text.pack(fill="both", expand=True, padx=16, pady=8)
+        self.text.tag_configure("step", foreground=C["accent"], font=("DejaVu Sans Mono", 9, "bold"))
+        row = tk.Frame(self, bg=C["panel"])
+        row.pack(fill="x", padx=16, pady=(0, 14))
+        self.reboot_btn = ttk.Button(row, text="🔄  Restart the Pi now", style="Accent.TButton",
+                                     command=lambda: app.act_power("reboot"))
+        tk.Label(row, text="Closing this window doesn't stop the update.", bg=C["panel"], fg=C["dim"],
+                 font=FONT_S).pack(side="left")
+        ttk.Button(row, text="Esc  Close", command=self.destroy).pack(side="right")
+        self.bind("<Escape>", lambda e: self.destroy())
+        self._last = None
+        self.after(150, lambda: self.winfo_exists() and self.focus_force())
+        self.after(300, self._poll)
+
+    def _poll(self):
+        if not self.winfo_exists():
+            return
+        st, t0, t1, rb, log = update_state()
+        if log != self._last:
+            self._last = log
+            at_end = self.text.yview()[1] > 0.98
+            self.text.config(state="normal")
+            self.text.delete("1.0", "end")
+            for line in log.splitlines()[-400:]:
+                self.text.insert("end", line + "\n", "step" if line.startswith("== ") else ())
+            self.text.config(state="disabled")
+            if at_end or st != "running":
+                self.text.see("end")
+        steps = [l for l in log.splitlines() if l.startswith("== ") and "/6 " in l]
+        if st == "running":
+            now = steps[-1][3:] if steps else "Starting…"
+            self.status.config(text=f"{now}   ·   {fmt_dur(time.time() - t0)} so far", fg=C["amber"])
+        elif st == "done":
+            self.status.config(text="✔ Everything is up to date." + (" Restart the Pi to finish." if rb else ""),
+                               fg=C["green"])
+            if rb and not self.reboot_btn.winfo_ismapped():
+                self.reboot_btn.pack(side="right", padx=(0, 8))
+        elif st == "failed":
+            last = [l for l in log.splitlines() if l.startswith("== ")]
+            self.status.config(text="✖ " + (last[-1][3:] if last else "The update didn't finish."), fg=C["red"])
+        self.after(1500, self._poll)
+
+
+class WebPasswordDialog(tk.Toplevel):
+    """Sets the web page's control password. Anyone on the network can look; changing things needs this."""
+
+    def __init__(self, app, then_turn_on=False):
+        super().__init__(app)
+        self.app, self.then_turn_on = app, then_turn_on
+        self.title("Web page password")
+        self.configure(bg=C["panel"])
+        self.transient(app)
+        self.resizable(False, False)
+        tk.Label(self, text="🔑  Web page password", bg=C["panel"], fg=C["fg"], font=(FAM, 15, "bold")).pack(
+            anchor="w", padx=16, pady=(16, 4))
+        tk.Label(self, text="Anyone on your network can open the web page and look. Starting the hotspot, ending "
+                            "programs and the other controls need this password. Use at least 6 characters, and not "
+                            "the hotspot password, since everyone on the hotspot knows that one.",
+                 bg=C["panel"], fg=C["fg"], font=FONT_S, wraplength=440, justify="left").pack(anchor="w", padx=16)
+        form = tk.Frame(self, bg=C["panel"])
+        form.pack(fill="x", padx=16, pady=(8, 0))
+        self.pw1, self.pw2 = tk.StringVar(), tk.StringVar()
+        self.entries = []
+        for r, (label, var) in enumerate((("Password", self.pw1), ("Type it again", self.pw2))):
+            tk.Label(form, text=label, bg=C["panel"], fg=C["fg"], font=FONT_B, anchor="w").grid(
+                row=r, column=0, sticky="w", pady=4)
+            e = ttk.Entry(form, textvariable=var, width=28, font=FONT, show="•")
+            e.grid(row=r, column=1, sticky="we", padx=(10, 0), pady=4)
+            self.entries.append(e)
+        self.show = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form, text="Show", variable=self.show,
+                        command=lambda: [e.config(show="" if self.show.get() else "•") for e in self.entries]).grid(
+            row=0, column=2, padx=(8, 0))
+        self.msg = tk.Label(self, text="", bg=C["panel"], fg=C["red"], font=FONT_S, wraplength=440, justify="left",
+                            anchor="w")
+        self.msg.pack(fill="x", padx=16, pady=(6, 0))
+        row = tk.Frame(self, bg=C["panel"])
+        row.pack(fill="x", padx=16, pady=(8, 16))
+        ttk.Button(row, text="Enter  Save" + (" & turn on" if then_turn_on else ""), style="Accent.TButton",
+                   command=self.save).pack(side="left")
+        ttk.Button(row, text="Esc  Cancel", command=self.destroy).pack(side="right")
+        self.bind("<Return>", lambda e: self.save())
+        self.bind("<KP_Enter>", lambda e: self.save())
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.after(150, lambda: self.winfo_exists() and (self.focus_force(), self.entries[0].focus_set()))
+
+    def save(self):
+        a, b = self.pw1.get(), self.pw2.get()
+        if len(a) < 6:
+            self.msg.config(text="Please use at least 6 characters.")
+            return
+        if a != b:
+            self.msg.config(text="Those two don't match. Type them again.")
+            return
+        if a == AP_PASS:
+            self.msg.config(text="Please pick something different from the hotspot password.")
+            return
+        rc, out = set_web_password(a)
+        if rc != 0:
+            self.msg.config(text="Couldn't save it: " + (out.splitlines()[-1] if out else "unknown error"))
+            return
+        self.app.log("Web page password saved.", ok=True)
+        turn_on = self.then_turn_on
+        self.destroy()
+        if turn_on:
+            self.app.web_switch.set(True)
+            self.app.act_web(True)
+
+
 class ApSettingsDialog(tk.Toplevel):
     """Change the hotspot's Wi-Fi name and password. Works from the keyboard alone."""
 
@@ -1638,7 +1825,7 @@ class App(tk.Tk):
         super().__init__()
         load_ap_settings()
         self.title(APP_NAME)
-        self.geometry("1100x760")
+        self.geometry("1200x760" if self.winfo_screenwidth() >= 1300 else "1100x760")
         self.minsize(920, 640)
         self.configure(bg=C["bg"])
         self._style()
@@ -1668,7 +1855,7 @@ class App(tk.Tk):
 
         self.status_var = tk.StringVar(
             value="F1–F5 tabs · Ctrl+P who's connected · Ctrl+M clean memory · Ctrl+B Bluetooth rescue · "
-                  "Ctrl+H hotspot · Ctrl+Q quit")
+                  "Ctrl+H hotspot · Ctrl+U update · Ctrl+Q quit")
 
         self._build_header()
         bar = tk.Frame(self, bg=C["panel"])
@@ -1705,6 +1892,8 @@ class App(tk.Tk):
         h = tk.Frame(self, bg=C["bg"])
         h.pack(fill="x", padx=12, pady=(10, 6))
         tk.Label(h, text="▣ " + APP_NAME, bg=C["bg"], fg=C["fg"], font=FONT_H).pack(side="left")
+        tk.Label(h, text="👤 " + current_user(), bg=C["panel2"], fg=C["fg"], font=FONT_B, padx=8, pady=2).pack(
+            side="left", padx=(12, 0))
         right = tk.Frame(h, bg=C["bg"])
         right.pack(side="right")   # packed before the IP text so the lights always get their room
         self.hdr_ip = tk.Label(h, text="", bg=C["bg"], fg=C["dim"], font=FONT, anchor="w")
@@ -1807,7 +1996,8 @@ class App(tk.Tk):
         self.l_ap = Light(lr, "Hotspot")
         self.l_fallback = Light(lr, "Auto-hotspot at boot")
         self.l_vpn = Light(lr, "Tailscale")
-        for w in (self.l_vnc, self.l_ssh, self.l_ap, self.l_fallback, self.l_vpn):
+        self.l_web = Light(lr, "Web page")
+        for w in (self.l_vnc, self.l_ssh, self.l_ap, self.l_fallback, self.l_vpn, self.l_web):
             w.pack(side="left", padx=(0, 10))
         model = read_file("/proc/device-tree/model").replace("\x00", "") or os.uname().machine
         self.sys["Model"].config(text=model.replace("Raspberry Pi", "Pi"))
@@ -1980,11 +2170,15 @@ class App(tk.Tk):
             tk.Label(parent, text=text, bg=C["panel"], fg=C["dim"], font=FONT_S, justify="left",
                      wraplength=300, anchor="w").pack(fill="x", padx=10, pady=(4, 8))
 
-        m = box("Memory", 0, 0)
+        m = box("Memory & updates", 0, 0)
         ttk.Button(m, text="🧹  Clean & optimize memory   (Ctrl+M)", style="Accent.TButton",
                    command=self.act_clean_memory).pack(fill="x", padx=10)
         note(m, "Drops cached files, compacts RAM and pulls swap back into memory. "
                 "Best right before opening something big.")
+        ttk.Button(m, text="⬆  Update everything   (Ctrl+U)", command=self.act_update).pack(fill="x", padx=10)
+        self.t_update = tk.Label(m, text="", bg=C["panel"], fg=C["dim"], font=FONT_S, anchor="w", justify="left",
+                                 wraplength=300)
+        self.t_update.pack(fill="x", padx=10, pady=(4, 8))
 
         b = box("Bluetooth", 0, 1)
         ttk.Button(b, text="🛟  Rescue Bluetooth   (Ctrl+B)", style="Accent.TButton",
@@ -2010,7 +2204,7 @@ class App(tk.Tk):
         for r, (k, v) in enumerate((("Network", AP_SSID), ("Password", AP_PASS),
                                     ("Pi address", AP_IP), ("The Shelf", SHELF_URL))):
             self.ap_vals[k] = kv_row(info, r, k)
-            self.ap_vals[k].config(text=v, wraplength=170, justify="left")
+            self.ap_vals[k].config(text=v, wraplength=170 if r < 2 else 260, justify="left")
         ttk.Button(info, text="✏ Change", width=8, command=self.act_ap_settings).grid(
             row=0, column=2, rowspan=2, sticky="e", padx=(4, 10))
         info.columnconfigure(1, weight=1)
@@ -2094,6 +2288,15 @@ class App(tk.Tk):
                                  wraplength=320)
         self.vpn_info.pack(fill="x", padx=10, pady=(2, 6))
         self._vpn_busy = 0.0
+        wr = tk.Frame(r, bg=C["panel"])
+        wr.pack(fill="x", padx=10)
+        ttk.Button(wr, text="🔑 Password", command=lambda: WebPasswordDialog(self)).pack(side="right")
+        self.web_switch = ToggleSwitch(wr, "Web page", False, command=self.act_web)
+        self.web_switch.pack(side="left")
+        self.web_info = tk.Label(r, text="", bg=C["panel"], fg=C["dim"], font=FONT_S, justify="left", anchor="w",
+                                 wraplength=320)
+        self.web_info.pack(fill="x", padx=10, pady=(2, 6))
+        self._web_busy = 0.0
         self.autostart_var = tk.BooleanVar(value=os.path.exists(AUTOSTART_FILE))
         ttk.Checkbutton(r, text="Open at desktop startup",
                         variable=self.autostart_var, command=self.act_autostart).pack(anchor="w", padx=10)
@@ -2405,6 +2608,7 @@ class App(tk.Tk):
             self.bind_all(f"<{key}>", lambda e, i=i: self.nb.select(i))
             self.bind_all(f"<Alt-Key-{i + 1}>", lambda e, i=i: self.nb.select(i))
         self.bind_all("<Control-m>", lambda e: self._not_typing(e) and self.act_clean_memory())
+        self.bind_all("<Control-u>", lambda e: self._not_typing(e) and self.act_update())
         self.bind_all("<Control-b>", lambda e: self._not_typing(e) and self.act_bt_rescue())
         self.bind_all("<Control-Alt-b>", lambda e: self.act_bt_pair())
         self.bind_all("<Control-h>", lambda e: self._not_typing(e) and self.act_toggle_hotspot())
@@ -2670,6 +2874,45 @@ class App(tk.Tk):
     def act_led_test(self):
         self.run_action("Power light test (flashes for 6 seconds)", lambda: run_helper("led", "test", "6"))
 
+    def act_web(self, on):
+        if on and not os.path.exists(WEB_PASSWORD_FILE):
+            self.web_switch.set(False)
+            WebPasswordDialog(self, then_turn_on=True)
+            return
+        self._web_busy = time.time() + 8
+        self.web_info.config(text="Starting…" if on else "Stopping…", fg=C["amber"])
+
+        def done(rc):
+            self.slow.vpn_now = True   # re-check the web page's state on the next poll too
+            self._web_busy = time.time() + (2 if rc == 0 else 0)
+            if rc != 0:
+                self.web_switch.set(not on)
+        self.run_action("Web page: " + ("ON" if on else "OFF"), lambda: run_helper("web", "on" if on else "off", timeout=40),
+                        on_done=done)
+
+    def act_update(self):
+        for w in self.winfo_children():
+            if isinstance(w, UpdateWindow):
+                w.deiconify(); w.lift(); w.focus_force()
+                return
+        if update_state()[0] != "running":
+            if not messagebox.askyesno(
+                    APP_NAME, "Update everything on this Pi now?\n\n"
+                              "• Raspberry Pi OS and all installed programs, including Tailscale\n"
+                              "• Firmware\n"
+                              "• The Shelf, the local AI engine and RPi Task Manager itself\n"
+                              "• Old versions and leftovers are removed\n\n"
+                              "It needs internet and can take 5 to 30 minutes. Keep the Pi plugged in. "
+                              "You can keep using the Pi meanwhile.", parent=self):
+                return
+
+            def started(rc):
+                if rc == 0:
+                    UpdateWindow(self)
+            self.run_action("Update everything", lambda: run_helper("update", "start", timeout=30), on_done=started)
+        else:
+            UpdateWindow(self)
+
     def act_vnc(self):
         self.run_action("Turn on VNC", lambda: run_helper("vnc-enable"))
 
@@ -2844,6 +3087,8 @@ class App(tk.Tk):
                       f"Hotspot ({len(sd.get('clients', []))} connected)" if sd.get("ap_on") else "Hotspot")
         if "fallback" in sd:
             self.l_fallback.set(C["green"] if sd["fallback"] else C["off"])
+        self.l_web.set(C["green"] if sd.get("web") else C["off"],
+                       f"Web page :{sd.get('web_port', 8090)}" if sd.get("web") else "Web page")
         vpn = sd.get("vpn") or {}
         self.l_vpn.set(C["green"] if vpn.get("state") == "Running" else C["amber"] if vpn.get("state") == "NeedsLogin"
                        else C["off"], f"Tailscale {vpn['ip']}" if vpn.get("state") == "Running" else "Tailscale")
@@ -2923,8 +3168,32 @@ class App(tk.Tk):
             text = ("5 GHz: faster, shorter range, not seen by older devices." if band == "a"
                     else "2.4 GHz: longest range, works with every device.")
         self.band_info.config(text=text)
+        if sd.get("shelf_url"):
+            self.ap_vals["The Shelf"].config(text=sd["shelf_url"])
+        st, t0, t1, rb, _ = update_state()
+        if st == "running":
+            self.t_update.config(text=f"Updating now… ({fmt_dur(time.time() - t0)} so far). Press the button to watch.",
+                                 fg=C["amber"])
+        elif st == "done":
+            self.t_update.config(text=f"Last updated {time.strftime('%b %d at %I:%M %p', time.localtime(t1))}."
+                                 + (" Restart the Pi to finish." if rb else ""), fg=C["amber"] if rb else C["dim"])
+        elif st == "failed":
+            self.t_update.config(text="The last update didn't finish. Press the button to try again.", fg=C["red"])
+        else:
+            self.t_update.config(text="System, firmware, The Shelf, the AI and this app, in one go.", fg=C["dim"])
         self.t_vnc.set(C["green"] if sd.get("vnc") else C["red"],
                        "VNC running on port 5900" if sd.get("vnc") else "VNC not running")
+        if "web_enabled" in sd and time.time() > self._web_busy:
+            self.web_switch.set(sd["web_enabled"])
+            port = sd.get("web_port", 8090)
+            if sd.get("web"):
+                addrs = " or ".join(f"http://{ip}:{port}" for ip in local_ips()[:2]) or f"this Pi's address, port {port}"
+                self.web_info.config(text=f"On. Open {addrs} on any phone or PC on the same network.", fg=C["green"])
+            elif sd["web_enabled"]:
+                self.web_info.config(text="Starting…", fg=C["amber"])
+            else:
+                self.web_info.config(text="Off. Anyone can look once it's on; the controls need your web password.",
+                                     fg=C["dim"])
         vpn = sd.get("vpn")
         if vpn is not None and time.time() > self._vpn_busy:
             st = vpn.get("state")
@@ -2934,7 +3203,8 @@ class App(tk.Tk):
                 text, col = "Off. Flip it on to set up (needs internet once, free for personal use).", C["dim"]
             elif st == "Running":
                 text, col = (f"On · this Pi is {vpn['ip']}" + (f" ({vpn['name'].split('.')[0]})" if vpn.get("name") else "")
-                             + f". From your phone or PC on Tailscale: VNC {vpn['ip']}:5900 · ssh {user}@{vpn['ip']}"), C["green"]
+                             + f". From your phone or PC on Tailscale: VNC {vpn['ip']}:5900 · ssh {user}@{vpn['ip']}"
+                             + (f" · web http://{vpn['ip']}:{sd.get('web_port', 8090)}" if sd.get("web") else "")), C["green"]
             elif st == "NeedsLogin":
                 text, col = "Needs a one-time sign-in. Flip it on to get the sign-in code.", C["amber"]
             else:

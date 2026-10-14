@@ -100,6 +100,7 @@ dialog::backdrop{background:#000a}
   <div class="hrow">
     <div class="brand">▣ RPiZero Task Manager</div>
     <div class="ip" id="hip">…</div>
+    <span class="chip" id="huser" title="The Pi's user account" style="cursor:default">👤 …</span>
     <button class="chip" id="hpeople" title="Who's connected">👥 …</button>
     <div class="lights" id="hlights"></div>
     <button class="btn sm" id="loginBtn">🔒 Log in</button>
@@ -287,6 +288,11 @@ dialog::backdrop{background:#000a}
       <div class="row"><button class="btn" data-act="reboot" data-confirm="Reboot the Pi now? This page will come back in about a minute.">Reboot</button>
       <button class="btn danger" data-act="poweroff" data-confirm="Shut the Pi down now? You'll need to unplug and replug it to start it again.">Shut down</button></div>
       <p class="muted">Use these instead of pulling the plug. It protects the SD card.</p>
+      <h3 style="margin-top:14px">Updates</h3>
+      <div class="row needs-auth"><button class="btn acc" id="updBtn">⬆ Update everything</button></div>
+      <div class="lockmsg when-locked">🔒 Log in to update the Pi.</div>
+      <p class="muted" id="updLine">System, firmware, The Shelf, Tailscale and this app, in one go.</p>
+      <div class="log needs-auth" id="updLog" style="display:none;max-height:260px;white-space:pre-wrap"></div>
     </div>
     <div class="card" style="grid-column:1/-1;min-width:0">
       <h3>Activity log</h3>
@@ -424,7 +430,7 @@ function renderHotspot() {
   $("#apState").innerHTML = S.ap_on ? dot(C.green, `Hotspot ON · ${S.people} connected`) : dot(null, S.nm === false ? "NetworkManager not found" : "Hotspot off");
   $("#apBtn").textContent = S.ap_on ? "⏹ Stop hotspot" : "📶 Start hotspot";
   $("#apInfo").innerHTML = `<span>Network</span><span>${esc(INFO.ssid)}</span><span>Password</span><span>${esc(INFO.pass)}</span>
-    <span>Pi address</span><span>${esc(INFO.ap_ip)}</span><span>This page</span><span>http://${esc(INFO.ap_ip)}:${INFO.port}</span><span>The Shelf</span><span>${esc(INFO.shelf)}</span>`;
+    <span>Pi address</span><span>${esc(INFO.ap_ip)}</span><span>This page</span><span>http://${esc(INFO.ap_ip)}:${INFO.port}</span><span>The Shelf</span><span>${esc(S.shelf_url || INFO.shelf)}</span>`;
   $("#apNote").innerHTML = dot(S.fallback ? C.green : null, "Starts by itself at boot when there's no network") + " · 2.4 GHz (the Zero 2 W has no 5 GHz)";
   if (document.activeElement !== $("#ledSw")) $("#ledSw").checked = !!S.led;
   if (S.ap_keep_data !== undefined) {
@@ -435,7 +441,38 @@ function renderHotspot() {
   if (S.ap_ssid && S.ap_ssid !== INFO.ssid) refreshInfo();
   $("#peopleCount").textContent = S.ap_on ? S.people + " now" : "hotspot off";
 }
+let updWatching = false;
+async function watchUpdate(force) {
+  if (updWatching && !force) return;
+  updWatching = true;
+  try {
+    for (;;) {
+      let u; try { u = await api("/api/update"); } catch (e) { break; }
+      const box = $("#updLog"), atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+      if (u.log) { box.style.display = ""; box.textContent = u.log; if (atEnd || u.state !== "running") box.scrollTop = box.scrollHeight; }
+      const steps = (u.log || "").split("\n").filter(l => l.startsWith("== "));
+      const last = steps.length ? steps[steps.length - 1].slice(3) : "";
+      if (u.state === "running") {
+        $("#updLine").innerHTML = `<span class="warn">Updating… ${esc(last)} (${fmtDur(Date.now() / 1000 - u.start)} so far). You can close this page; it keeps going.</span>`;
+        $("#updBtn").disabled = true;
+      } else {
+        $("#updBtn").disabled = false;
+        if (u.state === "done") $("#updLine").innerHTML = `<span class="ok">✔ Updated ${new Date(u.end * 1000).toLocaleString()}.</span>` +
+          (u.reboot ? ` <span class="warn">Restart the Pi to finish.</span> <button class="btn acc sm" data-act="reboot" data-confirm="Restart the Pi now to finish the update?">Restart now</button>` : "");
+        else if (u.state === "failed") $("#updLine").innerHTML = `<span class="bad">✖ ${esc(last || "The last update didn't finish.")}</span>`;
+        break;
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  } finally { updWatching = false; }
+}
+$("#updBtn").onclick = async () => {
+  if (!confirm("Update everything on this Pi now?\n\n• Raspberry Pi OS and all installed programs, including Tailscale\n• Firmware\n• The Shelf, the local AI engine and RPi Task Manager itself\n• Old versions and leftovers are removed\n\nIt needs internet and can take 5 to 30 minutes. Keep the Pi plugged in.")) return;
+  await act("update", {}, "Update everything");
+  watchUpdate(true);
+};
 function renderTools() {
+  if (AUTH && TAB === "tools" && !updWatching && !renderTools.checked) { renderTools.checked = true; watchUpdate(); }
   if (!$("#govSeg").contains(document.activeElement)) {
     const g = S.governor === "schedutil" ? "ondemand" : S.governor;
     $$('input[name=gov]').forEach(r => r.checked = r.value === g);
@@ -661,6 +698,7 @@ async function poll() {
 }
 (async () => {
   try { INFO = await api("/api/info"); setAuth(INFO.authed); } catch (e) {}
+  $("#huser").textContent = "👤 " + (INFO.user || "?");
   document.title = INFO.app || document.title;
   $("#ocBtns").innerHTML = (INFO.oc_presets || []).map(([p, t, f]) => `<button class="btn" data-oc="${p}" data-full="${esc(f)}">${esc(t)}</button>`).join("");
   let t = "overview"; try { t = localStorage.getItem("rz-tab") || t; } catch (e) {}

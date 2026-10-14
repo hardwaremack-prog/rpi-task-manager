@@ -61,6 +61,8 @@ Logging in lasts 12 hours on that browser. After 5 wrong passwords in a row, log
 
 **Bluetooth.** Scan & pair shows any pairing code in large digits on the page. Type it on the new keyboard and press its Enter key.
 
+**Update everything.** The **⬆ Update everything** button in the Tools tab's Power card brings the whole Zero up to date: Raspberry Pi OS and every installed program (Tailscale included), **The Shelf** if it's installed (newest version from GitHub, your files kept) and this Task Manager (only if GitHub has a newer version), and it removes old kernels and leftovers. The card shows each step live, and you can close the page meanwhile. It needs internet and can take 10–40 minutes on a Zero. The top bar also shows the Pi's username (👤).
+
 **Phones keep their mobile data.** The hotspot has no internet of its own, and normally a phone on Wi-Fi sends everything over it, so apps like Teams go quiet while you're on The Shelf. With **Phones keep their mobile data** on (the default, on the Hotspot tab), the hotspot hands out an address but no route to the internet, so phones use Wi-Fi only for the Pi and their mobile data for everything else. Switch it off only when the Zero itself is online and you want to share that. If a phone still acts offline, forget the network and join again.
 
 **Your own name and password.** On the Hotspot tab, open **✏ Change the network name & password**, type a new name (1–32 characters) and password (8–63), and press Save. If the hotspot is on it restarts, and everyone joins again with the new password. `sudo rpizero-helper ap-set --default` puts back RPIZERO-OPEN / fifty-seven57.
@@ -73,7 +75,7 @@ Logging in lasts 12 hours on that browser. After 5 wrong passwords in a row, log
 
 Visitors who aren't logged in never see the sign-in link or the address. You can also join with an auth key (under **More options**, or `sudo TAILSCALE_AUTHKEY=tskey-... bash install.sh`). From a terminal: `sudo rpizero-helper vpn up`, `vpn down`, `vpn logout`. While the Zero runs its own hotspot it has no internet, so Tailscale waits until it's back on a normal network.
 
-**The Shelf.** If you run The Shelf on the Zero, people on the hotspot reach it at `http://192.168.1.250/` and this page at `:8090`. They don't clash.
+**The Shelf.** If you run The Shelf on the Zero, people on the hotspot reach it at `http://192.168.1.250:8080/` and this page at `:8090`. They don't clash.
 
 ## Files
 

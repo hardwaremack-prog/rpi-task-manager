@@ -51,13 +51,16 @@ AP_SSID_DEFAULT = "RPIZERO-OPEN"   # Wi-Fi name and password; can be changed on 
 AP_PASS_DEFAULT = "fifty-seven57"
 AP_SSID, AP_PASS = AP_SSID_DEFAULT, AP_PASS_DEFAULT
 AP_IP = "192.168.1.250"
-SHELF_URL = f"http://{AP_IP}/"
+SHELF_URL = f"http://{AP_IP}:8080/"   # The Shelf's usual address on the hotspot (see shelf_url)
 CONF = "/etc/rpizero-taskmgr.conf"
+UPDATE_LOG = "/var/log/rpizero-update.log"      # written by "rpizero-helper update", readable by everyone
+UPDATE_STATE = "/run/rpizero-update.state"      # running|done|failed  start  end  reboot-needed
 CFG_DIR = os.path.expanduser(os.environ.get("RZ_CFG_DIR", "~/.config/rpizero-taskmgr"))
 AUTH_FILE = os.path.join(CFG_DIR, "web-password.json")
 STABILITY_MARK = os.path.join(CFG_DIR, "stability-running.json")
 LOG_DIR = os.path.expanduser(os.environ.get("RZ_LOG_DIR", "~/visitor-logs"))
 VISITOR_LOG = "RPIZERO-OPEN visitor log.csv"
+LOG_WRITE = os.environ.get("RZ_LOG_WRITE", "1") != "0"   # off when a desktop app on the same Pi writes the log
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 CFG_PATH = "/boot/firmware/config.txt" if os.path.exists("/boot/firmware/config.txt") else "/boot/config.txt"
 OC_BEGIN = "# >>> rpizero-taskmgr overclock >>>"
@@ -175,6 +178,31 @@ def ap_text_problem(ssid, password):
     if not (8 <= len(password) <= 63) or not re.fullmatch(r"[ -~]+", password):
         return "The password must be 8 to 63 letters, numbers or symbols."
     return ""
+
+
+def shelf_url(ports=None):
+    """The Shelf listens on 8080 unless it was set up on port 80."""
+    if ports is None:
+        ports = listening_ports()
+    return f"http://{AP_IP}/" if 80 in ports and 8080 not in ports else f"http://{AP_IP}:8080/"
+
+
+def current_user():
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (KeyError, ImportError):
+        return os.environ.get("USER") or "?"
+
+
+def update_state():
+    parts = read_file(UPDATE_STATE).split()
+    st = parts[0] if parts else "idle"
+    nums = [int(x) if x.isdigit() else 0 for x in (parts[1:4] + ["0", "0", "0"])[:3]]
+    if st == "running" and nums[0] and time.time() - nums[0] > 3 * 3600:
+        st = "failed"   # the Pi was restarted or the update was stopped part-way
+    log = read_file(UPDATE_LOG).splitlines()
+    return {"state": st, "start": nums[0], "end": nums[1], "reboot": nums[2] == 1, "log": "\n".join(log[-200:])}
 
 
 def led_blink_enabled():
@@ -433,9 +461,20 @@ class VisitorLog:
     def __init__(self):
         self.active, self.history, self.ap_on, self.error = {}, [], None, ""
         self.path = os.path.join(LOG_DIR, VISITOR_LOG)
+        self._mtime = None
+        self.refresh(force=True)
+
+    def refresh(self, force=False):
+        """Read the log file again. When another program writes it, this keeps the page up to date."""
+        if LOG_WRITE and not force:
+            return
         try:
+            mt = os.path.getmtime(self.path)
+            if mt == self._mtime and not force:
+                return
             with open(self.path, newline="") as f:
                 self.history = [r for r in csv.DictReader(f) if r.get("Event")][-300:]
+            self._mtime = mt
         except (OSError, csv.Error):
             pass
 
@@ -470,6 +509,8 @@ class VisitorLog:
             self._record(event, a, when)
 
     def _record(self, event, a, when):
+        if not LOG_WRITE:
+            return   # the desktop app on this Pi writes the log; refresh() reads it
         t = time.localtime(when)
         row = {"Date": time.strftime("%Y-%m-%d", t), "Time": time.strftime("%H:%M:%S", t), "Event": event,
                "Device name": a.get("name") or ("" if not a else "(no name)"),
@@ -766,7 +807,9 @@ class Poller(threading.Thread):
         d["ap_on"] = AP_CON in out.splitlines() if rc == 0 else False
         load_ap_settings()
         d["ap_ssid"] = AP_SSID
+        d["shelf_url"] = shelf_url()
         d["ap_keep_data"] = ap_keeps_mobile_data()
+        d["ap_band"] = "a" if re.search(r"^AP_BAND=a", read_file(CONF), re.M) else "bg"
         clients = hotspot_clients() if d["ap_on"] else []
         self.visitors.update(clients, d["ap_on"], now)
         d["people"] = len(self.visitors.active)
@@ -800,7 +843,7 @@ def board_info():
             osname = line.split("=", 1)[1].strip('"')
     return {"model": model, "os": osname, "host": socket.gethostname(), "ncpu": psutil.cpu_count() or 1,
             "app": APP_NAME, "version": VERSION, "ssid": AP_SSID, "pass": AP_PASS, "ap_ip": AP_IP,
-            "shelf": SHELF_URL, "port": PORT, "oc_presets": OC_PRESETS}
+            "shelf": SHELF_URL, "port": PORT, "oc_presets": OC_PRESETS, "user": current_user()}
 
 
 def qr_svg(text):
@@ -873,7 +916,8 @@ def do_action(name, a):
               "led-on": ("Flash light while hotspot is on: ON", ["led", "on"]),
               "led-off": ("Flash light while hotspot is on: OFF", ["led", "off"]),
               "led-test": ("Light test (6 seconds)", ["led", "test", "6"]),
-              "reboot": ("Reboot", ["reboot"]), "poweroff": ("Shut down", ["poweroff"])}
+              "reboot": ("Reboot", ["reboot"]), "poweroff": ("Shut down", ["poweroff"]),
+              "update": ("Update everything", ["update", "start"])}
     if name in simple:
         label, args = simple[name]
         return JOBS.start(label, lambda job: run_helper(*args)), None
@@ -1038,8 +1082,11 @@ class Handler(BaseHTTPRequestHandler):
         # -- password needed from here on
         if not self.authed():
             return self.send(403, {"error": "Log in first"})
+        if p == "/api/update":
+            return self.send(200, update_state())
         if p == "/api/visitors":
             v = POLLER.visitors
+            v.refresh()
             return self.send(200, {"active": v.active_list(time.time()), "history": list(reversed(v.history))[:150],
                                    "error": v.error, "path": v.path})
         if p == "/api/visitors.csv":
@@ -1055,6 +1102,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, svg, "image/svg+xml") if svg else self.send(404, "no sign-in pending", "text/plain")
         if p == "/api/report.txt":
             name = time.strftime("Hotspot visitors %Y-%m-%d %H%M.txt")
+            POLLER.visitors.refresh()
             return self.send(200, POLLER.visitors.report(), "text/plain",
                              {"Content-Disposition": f'attachment; filename="{name}"'})
         if p.startswith("/api/job/"):

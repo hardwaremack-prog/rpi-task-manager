@@ -38,6 +38,7 @@ step "Copying program files"
 install -d /opt/rpizero-taskmgr /opt/rpizero-taskmgr/web
 install -m 755 "$HERE/rpizero_taskmgr.py" /opt/rpizero-taskmgr/rpizero_taskmgr.py
 install -m 644 "$HERE/web/index.html" /opt/rpizero-taskmgr/web/index.html
+install -m 644 "$HERE/VERSION" /opt/rpizero-taskmgr/VERSION
 install -m 755 -o root -g root "$HERE/rpizero-helper" /usr/local/bin/rpizero-helper
 install -m 755 -o root -g root "$HERE/rpizero-fallback-ap" /usr/local/sbin/rpizero-fallback-ap
 cat > /usr/local/bin/rpizero-taskmgr <<'EOF'
