@@ -308,7 +308,7 @@ dialog::backdrop{background:#000a}
     <p class="muted" style="margin-top:0">Anyone can look. Changing things needs the password you set when installing.</p>
     <input type="password" id="pw" autocomplete="current-password" style="width:100%" placeholder="Password" required>
     <div class="bad small" id="loginErr" style="min-height:1.4em;margin-top:6px"></div>
-    <div class="row" style="justify-content:flex-end"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn acc" id="loginGo" value="go">Log in</button></div>
+    <div class="row" style="justify-content:flex-end"><button type="button" class="btn" id="loginCancel">Cancel</button><button type="submit" class="btn acc" id="loginGo" value="go">Log in</button></div>
   </form>
 </dialog>
 <div id="toast"></div>
@@ -672,8 +672,8 @@ async function pair(mac, name) {
 function openLogin() { $("#loginErr").textContent = ""; $("#pw").value = ""; $("#loginDlg").showModal(); $("#pw").focus(); }
 $("#loginBtn").onclick = async () => { if (AUTH) { await api("/api/logout", {}); setAuth(false); toast("Logged out"); poll(); } else openLogin(); };
 $("#loginBtn2").onclick = openLogin;
-$("#loginForm").onsubmit = async e => {
-  if (e.submitter && e.submitter.value === "cancel") return;
+$("#loginCancel").onclick = () => $("#loginDlg").close();
+$("#loginForm").onsubmit = async e => {   // Enter in the password box and the Log in button both land here
   e.preventDefault();
   $("#loginGo").disabled = true;
   try { await api("/api/login", {password:$("#pw").value}); $("#loginDlg").close(); setAuth(true); toast("🔓 Logged in", "ok"); poll(); loadVisitors(); }
