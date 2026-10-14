@@ -180,7 +180,7 @@ IS_500 = "500" in MODEL_NAME
 OC_PRESETS = ([("stock", "Stock", "stock 2.4 GHz"), ("2600", "2.6", "2.6 GHz"), ("2800", "2.8", "2.8 GHz"),
                ("3000", "3.0", "3.0 GHz")]
               if IS_PI5 else
-              [("stock", "Stock", "stock 1.8 GHz"), ("2000", "2.0 GHz", "2.0 GHz"), ("2147", "2.15", "2.15 GHz")])
+              [("stock", "Stock", "stock speed"), ("2000", "2.0 GHz", "2.0 GHz"), ("2147", "2.15", "2.15 GHz")])
 
 
 def read_be_u32(path):

@@ -76,7 +76,7 @@ def _is_pi5():
 OC_PRESETS = ([("stock", "Stock", "stock 2.4 GHz"), ("2600", "2.6", "2.6 GHz"), ("2800", "2.8", "2.8 GHz"),
                ("3000", "3.0", "3.0 GHz")]
               if _is_pi5() else
-              [("stock", "Stock", "stock 1.8 GHz"), ("2000", "2.0 GHz", "2.0 GHz"), ("2147", "2.15", "2.15 GHz")])
+              [("stock", "Stock", "stock speed"), ("2000", "2.0 GHz", "2.0 GHz"), ("2147", "2.15", "2.15 GHz")])
 SESSION_HOURS = 12
 
 

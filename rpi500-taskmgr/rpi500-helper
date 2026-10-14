@@ -374,6 +374,22 @@ oc)
     fi
     cp "$CFG" "$CFG.taskmgr-backup"
     sed -i "/^${OC_BEGIN}\$/,/^${OC_END}\$/d" "$CFG"
+    # Clear overclocks made any other way too, so Stock really is stock and a preset is exactly that preset:
+    # the rpi500-overclock-gui tool's block, and arm_freq/over_voltage/... lines set by hand or by raspi-config.
+    # (Graphics boost lives in its own block and is left alone. Name split so build scripts don't rename it.)
+    other_b="# --- BEGIN rpi4""00-overclock-gui managed block ---"; other_e="# --- END rpi4""00-overclock-gui managed block ---"
+    if grep -qxF "$other_b" "$CFG"; then
+        sed -i "/^${other_b}\$/,/^${other_e}\$/d" "$CFG"
+        echo "Removed the overclock set by the rpi4""00-overclock-gui tool."
+    fi
+    n_off=$(awk -v gb="$GPU_BEGIN" -v ge="$GPU_END" '$0==gb{g=1} $0==ge{g=0}
+        !g && /^[ \t]*(arm_freq|arm_freq_min|over_voltage|over_voltage_delta|over_voltage_min|gpu_freq|core_freq|force_turbo)[ \t]*=/{n++} END{print n+0}' "$CFG")
+    if [ "$n_off" -gt 0 ]; then
+        awk -v gb="$GPU_BEGIN" -v ge="$GPU_END" '$0==gb{g=1} $0==ge{g=0}
+            !g && /^[ \t]*(arm_freq|arm_freq_min|over_voltage|over_voltage_delta|over_voltage_min|gpu_freq|core_freq|force_turbo)[ \t]*=/{print "#" $0; next} {print}' \
+            "$CFG.taskmgr-backup" | sed "/^${OC_BEGIN}\$/,/^${OC_END}\$/d; /^${other_b}\$/,/^${other_e}\$/d" > "$CFG.tmp" && cat "$CFG.tmp" > "$CFG" && rm -f "$CFG.tmp"
+        echo "Turned off $n_off other overclock line(s) in config.txt (kept, with # in front)."
+    fi
     case "$prof" in
         2000) printf '%s\n[all]\narm_freq=2000\nover_voltage=6\n%s\n' "$OC_BEGIN" "$OC_END" >> "$CFG" ;;
         2147) printf '%s\n[all]\narm_freq=2147\nover_voltage=8\ngpu_freq=750\n%s\n' "$OC_BEGIN" "$OC_END" >> "$CFG" ;;
